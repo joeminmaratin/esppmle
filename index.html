@@ -3206,13 +3206,10 @@ Harap maklum!</span></div>
         document.getElementById('mainAdminAssignSection').classList.add('flex');
       }
 
-      const centerFilterSelect = document.getElementById('centerFilter');
-      if (currentUser.center_code && ['TEACHER', 'SUPERVISOR'].includes(currentUser.role)) {
-        centerFilterSelect.value = currentUser.center_code;
-        if (currentUser.role === 'SUPERVISOR') centerFilterSelect.disabled = true;
-      } else {
-        centerFilterSelect.value = 'ALL';
-      }
+      // SKOP PUSAT: hanya SUPER_ADMIN (termasuk akaun utama lama yang dikenal pasti
+      // melalui e-mel admin utama) boleh melihat / memilih SEMUA PUSAT.
+      // Guru, Penyelia dan Admin Pusat dikunci kepada pusat mereka sendiri.
+      applyCenterAccessUI();
 
       if (currentUser.role === 'TEACHER') {
         document.getElementById('teacherStatsSection').classList.remove('hidden');
@@ -3552,8 +3549,7 @@ Harap maklum!</span></div>
       if (!section || !currentUser) return;
 
       const selectedYear = document.getElementById('academicYearSelect')?.value || String(new Date().getFullYear());
-      let centerFilter = document.getElementById('centerFilter')?.value || 'ALL';
-      if (currentUser.role === 'SUPERVISOR') centerFilter = currentUser.center_code || 'ALL';
+      let centerFilter = getEffectiveCenterFilter();
 
       const totalEl = document.getElementById('studentDemographicsTotalBadge');
       const maleEl = document.getElementById('demoMaleStudents');
@@ -3646,7 +3642,7 @@ Harap maklum!</span></div>
 
     async function loadSupervisorStats() {
       const selectedYear = document.getElementById('academicYearSelect').value;
-      const centerFilter = currentUser.role === 'SUPERVISOR' ? currentUser.center_code : document.getElementById('centerFilter').value;
+      const centerFilter = getEffectiveCenterFilter();
 
       let teacherQuery = supabaseClient.from('users').select('*', { count: 'exact', head: true }).eq('role', 'TEACHER').eq('status', 'APPROVED');
       if (centerFilter !== 'ALL') teacherQuery = teacherQuery.eq('center_code', centerFilter);
@@ -3708,7 +3704,7 @@ Harap maklum!</span></div>
       const selfContainer = document.getElementById('supervisorSelfObsContent');
       if (!adminContainer || !selfContainer) return;
 
-      const centerFilter = currentUser.role === 'SUPERVISOR' ? currentUser.center_code : document.getElementById('centerFilter').value;
+      const centerFilter = getEffectiveCenterFilter();
       let query = supabaseClient.from('class_observations').select('*').order('observation_date', { ascending: false });
       if (centerFilter !== 'ALL') query = query.eq('center_code', centerFilter);
 
@@ -4282,7 +4278,7 @@ Harap maklum!</span></div>
     }
 
     async function populateTeacherDropdown() {
-      const centerFilter = currentUser.role === 'SUPERVISOR' ? currentUser.center_code : document.getElementById('centerFilter').value;
+      const centerFilter = getEffectiveCenterFilter();
       
       let query = supabaseClient.from('users').select('*').eq('status', 'APPROVED').order('full_name', { ascending: true });
       
@@ -4425,7 +4421,7 @@ Harap maklum!</span></div>
     }
 
     async function loadTeacherDirectory() {
-      const centerFilter = currentUser.role === 'SUPERVISOR' ? currentUser.center_code : (document.getElementById('centerFilter')?.value || 'ALL');
+      const centerFilter = getEffectiveCenterFilter();
       let query = supabaseClient.from('users').select('*').order('created_at', { ascending: false });
       if (centerFilter !== 'ALL') query = query.eq('center_code', centerFilter);
       if (currentUser.role === 'SUPERVISOR') query = query.eq('role', 'TEACHER');
@@ -5234,8 +5230,14 @@ Harap maklum!</span></div>
       section.style.opacity = '1';
 
       // Pastikan blok foto berada paling atas dalam borang.
-      const first = form.querySelector(':scope > *');
-      if (first !== section) form.insertBefore(section, first || null);
+      const first = form.firstElementChild;
+      if (section.parentElement !== form) form.insertBefore(section, first || null);
+      else if (first !== section) form.insertBefore(section, first || null);
+
+      section.hidden = false;
+      section.style.setProperty('display', 'block', 'important');
+      section.style.setProperty('visibility', 'visible', 'important');
+      section.style.setProperty('opacity', '1', 'important');
     }
 
     function toggleStudentForm() { 
@@ -5243,9 +5245,17 @@ Harap maklum!</span></div>
       const formArea = document.getElementById('studentFormArea');
       formArea.classList.toggle('hidden'); 
       if (!formArea.classList.contains('hidden')) {
+         const studentForm = formArea.querySelector('form');
+         if (studentForm) studentForm.reset();
+         resetStudentPhotoState();
          ensureStudentPhotoUploadSection();
-         formArea.querySelector('form').reset();
-          resetStudentPhotoState();
+         const photoSection = document.getElementById('studentPhotoUploadSection');
+         if (photoSection) {
+           photoSection.hidden = false;
+           photoSection.style.setProperty('display', 'block', 'important');
+           photoSection.style.setProperty('visibility', 'visible', 'important');
+           photoSection.style.setProperty('opacity', '1', 'important');
+         }
          document.getElementById('stdRegYear').value = document.getElementById('studentYearFilter').value !== 'ALL' ? document.getElementById('studentYearFilter').value : '2026';
       }
     }
@@ -7089,10 +7099,50 @@ async function handleSaveStudent(e) {
       }
     }
 
-    function isMainSuperAdminUser(u){ return !!u && (u.role === 'SUPER_ADMIN' || u.email === 'joemin_maratin@sil.org'); }
-    function isMainSuperAdmin(){ return !!currentUser && (currentUser.role === 'SUPER_ADMIN' || currentUser.email === 'joemin_maratin@sil.org'); }
+    function isMainSuperAdminUser(u){ return !!u && (u.role === 'SUPER_ADMIN' || String(u.email||'').toLowerCase() === 'joemin_maratin@sil.org'); }
+    function isMainSuperAdmin(){ return !!currentUser && (currentUser.role === 'SUPER_ADMIN' || String(currentUser.email||'').toLowerCase() === 'joemin_maratin@sil.org'); }
     function getCurrentRole(){ return String(currentUser?.role || '').trim().toUpperCase(); }
     function isSupervisorUser(){ return getCurrentRole() === 'SUPERVISOR'; }
+
+    // Hanya akaun SUPER_ADMIN / Admin Utama mempunyai skop merentas semua pusat.
+    // Semua role lain mesti menggunakan center_code sendiri.
+    function canViewAllCenters(u){
+      const x=u || currentUser;
+      return !!x && (String(x.role||'').trim().toUpperCase()==='SUPER_ADMIN' || String(x.email||'').trim().toLowerCase()==='joemin_maratin@sil.org');
+    }
+    function getEffectiveCenterFilter(){
+      if(canViewAllCenters()) return document.getElementById('centerFilter')?.value || 'ALL';
+      const role=getCurrentRole();
+      if(['TEACHER','SUPERVISOR','ADMIN'].includes(role)) return String(currentUser?.center_code||'').trim() || 'NONE';
+      return document.getElementById('centerFilter')?.value || 'ALL';
+    }
+    function applyCenterAccessUI(){
+      const cf=document.getElementById('centerFilter');
+      if(!cf || !currentUser) return;
+      const role=getCurrentRole();
+      if(canViewAllCenters()){
+        cf.disabled=false;
+        cf.classList.remove('opacity-60','cursor-not-allowed');
+        if(!cf.value) cf.value='ALL';
+        return;
+      }
+      const center=String(currentUser?.center_code||'').trim();
+      // Jangan benarkan dropdown meninggalkan pusat pengguna.
+      if(center){
+        let opt=Array.from(cf.options).find(o=>String(o.value)===center);
+        if(!opt){
+          opt=document.createElement('option'); opt.value=center; opt.textContent=center; cf.appendChild(opt);
+        }
+        cf.value=center;
+        cf.disabled=true;
+        cf.classList.add('opacity-60','cursor-not-allowed');
+      }else{
+        cf.innerHTML='<option value="NONE">Pusat belum ditetapkan</option>';
+        cf.value='NONE';
+        cf.disabled=true;
+        cf.classList.add('opacity-60','cursor-not-allowed');
+      }
+    }
     function canViewTeacherAnalytics(){ const role=getCurrentRole(); return !!currentUser && ['SUPERVISOR','ADMIN','SUPER_ADMIN'].includes(role) || !!currentUser && currentUser.email === 'joemin_maratin@sil.org'; }
     function parseLoginHistory(u){
       if(!u) return [];
@@ -7153,8 +7203,8 @@ async function handleSaveStudent(e) {
     function getSelectedAnalyticsYear(){return Number(document.getElementById('analyticsYearSelect')?.value||new Date().getFullYear());}
     function getAnalyticsCenter(){return document.getElementById('teacherActivityCenterFilter')?.value||'ALL';}
     function getTeacherAnalyticsBaseData(){
-      const center=isSupervisorUser() ? (currentUser?.center_code||'ALL') : getAnalyticsCenter();
-      return teacherDirectoryData.filter(u=>u.role==='TEACHER'&&(center==='ALL'||u.center_code===center));
+      const center=canViewAllCenters() ? getAnalyticsCenter() : getEffectiveCenterFilter();
+      return teacherDirectoryData.filter(u=>u.role==='TEACHER'&&(center!=='NONE'&&(center==='ALL'||u.center_code===center)));
     }
     function getLoginDatesForYear(u,year){return parseLoginHistory(u).map(x=>new Date(x)).filter(d=>!Number.isNaN(d.getTime())&&d.getFullYear()===Number(year));}
     function populateAnalyticsYearSelect(){const e=document.getElementById('analyticsYearSelect');if(!e)return;const ys=new Set([new Date().getFullYear()]);teacherDirectoryData.filter(u=>u.role==='TEACHER').forEach(u=>parseLoginHistory(u).forEach(t=>{const d=new Date(t);if(!Number.isNaN(d.getTime()))ys.add(d.getFullYear());}));const current=Number(e.value||new Date().getFullYear());e.innerHTML=[...ys].sort((a,b)=>b-a).map(y=>`<option value="${y}">${y}</option>`).join('');e.value=ys.has(current)?String(current):String(new Date().getFullYear());}
@@ -7179,8 +7229,13 @@ async function handleSaveStudent(e) {
       a.classList.remove('opacity-60','cursor-not-allowed');
       section?.classList.remove('supervisor-scope');
       badge?.classList.add('hidden');
-      if(m)a.value=m.value||'ALL';
-      if(scope)scope.textContent='Pantau penggunaan sistem berdasarkan sejarah login sebenar, aktiviti terkini dan status guru.';
+      if(m)a.value=canViewAllCenters() ? (m.value||'ALL') : getEffectiveCenterFilter();
+      if(!canViewAllCenters()){
+        a.value=getEffectiveCenterFilter();
+        a.disabled=true;
+        a.classList.add('opacity-60','cursor-not-allowed');
+        if(scope)scope.textContent=`Pantau penggunaan sistem guru di pusat ${getEffectiveCenterFilter()}. Data merentas pusat tidak dipaparkan.`;
+      }else if(scope)scope.textContent='Pantau penggunaan sistem berdasarkan sejarah login sebenar, aktiviti terkini dan status guru.';
     }
     function closeTeacherSearchDropdown(){
       const d=document.getElementById('teacherSearchDropdown');
@@ -7451,7 +7506,45 @@ async function handleSaveStudent(e) {
       doc.autoTable({startY:58,head:[['Bil','Tarikh & Masa Login']],body:h.slice(0,100).map((d,i)=>[i+1,formatLoginDate(d)]),styles:{fontSize:8},headStyles:{fillColor:[49,46,129]}});
       doc.save('Aktiviti_'+(u.full_name||'Guru').replace(/[^a-z0-9]+/gi,'_')+'.pdf');
     }
-    function printTeacherActivityReport(){const c=selectedTeacherActivity?document.getElementById('activityReportContent')?.innerHTML:document.getElementById('teacherAnalyticsSection')?.innerHTML;if(!c)return;const w=window.open('','_blank','width=1200,height=800');const html='<!doctype html><html><head><title>Laporan Aktiviti Guru</title><style>body{font-family:Arial;padding:24px;color:#1e293b}button,input,select{display:none!important}.grid{display:grid;gap:12px}.bg-white{background:#fff}.border{border:1px solid #ddd}.p-3,.p-4,.p-5{padding:12px}.rounded-xl,.rounded-2xl{border-radius:12px}</style></head><body>'+c+'</body></html>';w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300);}
+    function printTeacherActivityReport(){const c=selectedTeacherActivity?document.getElementById('activityReportContent')?.innerHTML:document.getElementById('teacherAnalyticsSection')?.innerHTML;if(!c)return;const w=window.open('','_blank','width=1200,height=800');const html='<!doctype html><html><head><title>Laporan Aktiviti Guru</title><style>body{font-family:Arial;padding:24px;color:#1e293b}button,input,select{display:none!important}.grid{display:grid;gap:12px}.bg-white{background:#fff}.border{border:1px solid #ddd}.p-3,.p-4,.p-5{padding:12px}.rounded-xl,.rounded-2xl{border-radius:12px}</style>
+<style id="student-photo-final-visibility-fix">
+#studentFormArea #studentPhotoUploadSection {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  position: relative !important;
+  width: 100% !important;
+  min-height: 138px !important;
+  margin: 0 0 14px 0 !important;
+  padding: 14px !important;
+  border: 2px solid #c7d2fe !important;
+  border-radius: 18px !important;
+  background: #ffffff !important;
+  box-shadow: 0 6px 18px rgba(49,46,129,.08) !important;
+}
+#studentFormArea #studentPhotoUploadSection .student-photo-fixed-grid {
+  display: grid !important;
+  grid-template-columns: 100px minmax(0,1fr) !important;
+  gap: 14px !important;
+  align-items: center !important;
+}
+#studentFormArea #studentPhotoUploadSection #stdPhotoPreview {
+  display: block !important;
+  width: 100px !important;
+  height: 120px !important;
+  object-fit: cover !important;
+}
+@media (max-width: 640px) {
+  #studentFormArea #studentPhotoUploadSection .student-photo-fixed-grid {
+    grid-template-columns: 1fr !important;
+    text-align: center !important;
+  }
+  #studentFormArea #studentPhotoUploadSection #stdPhotoPreview {
+    margin: 0 auto !important;
+  }
+}
+</style>
+</head><body>'+c+'</body></html>';w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300);}
 
     document.addEventListener('click',function(e){
       const wrap=document.getElementById('teacherActivitySearch')?.parentElement;
@@ -8027,10 +8120,9 @@ async function handleSaveStudent(e) {
       const role=String(currentUser?.role||'').trim().toUpperCase();
       const cf=document.getElementById('centerFilter');
 
-      // Penyelia hanya boleh melihat pusat yang ditetapkan kepadanya.
-      if(role==='SUPERVISOR' && cf){
-        cf.value=String(currentUser?.center_code||'ALL');
-      }
+      // Hanya SUPER_ADMIN boleh memilih semua pusat. Role lain sentiasa dikunci
+      // kepada center_code akaun masing-masing.
+      applyCenterAccessUI();
 
       if(['SUPER_ADMIN','ADMIN','SUPERVISOR'].includes(role)){
         if(typeof loadSupervisorStats==='function') await loadSupervisorStats();
@@ -8207,245 +8299,94 @@ async function handleSaveStudent(e) {
 })();
 </script>
 
-
-<!-- ================================================================
-     FINAL FIX 2026-09-01
-     1. Ruang upload foto murid = STATIK di dalam borang pendaftaran.
-     2. Tiada runtime-injected duplicate photo panel.
-     3. Stray literal "\n" dibuang dari seluruh dokumen yang dipaparkan.
-     4. Fungsi sedia ada untuk simpan/edit/padam foto dikekalkan.
-     ================================================================ -->
-<style id="final-student-photo-ui-fix">
-  /* Foto murid: sentiasa kelihatan apabila borang pendaftaran dibuka. */
-  #studentPhotoUploadSection{
-    display:block !important;
-    visibility:visible !important;
-    opacity:1 !important;
-    width:100% !important;
-    min-height:138px !important;
-    margin:0 0 14px 0 !important;
-    padding:14px !important;
-    border:2px solid #c7d2fe !important;
-    border-radius:18px !important;
-    background:#ffffff !important;
-    box-shadow:0 6px 18px rgba(49,46,129,.08) !important;
-    position:relative !important;
-    z-index:2 !important;
-  }
-  #studentPhotoUploadSection .student-photo-fixed-grid{
-    display:grid !important;
-    grid-template-columns:100px minmax(0,1fr) !important;
-    gap:14px !important;
-    align-items:center !important;
-  }
-  #studentPhotoUploadSection #stdPhotoPreview{
-    width:100px !important;
-    height:120px !important;
-    min-width:100px !important;
-    min-height:120px !important;
-    display:block !important;
-    object-fit:cover !important;
-    border-radius:14px !important;
-    border:1px solid #dbe2f0 !important;
-    background:#f8fafc !important;
-  }
-  #studentPhotoUploadSection .student-photo-fixed-title{
-    display:block !important;
-    font-size:13px !important;
-    line-height:1.25 !important;
-    font-weight:900 !important;
-    color:#172554 !important;
-    margin-bottom:4px !important;
-  }
-  #studentPhotoUploadSection .student-photo-fixed-note{
-    display:block !important;
-    font-size:10px !important;
-    line-height:1.45 !important;
-    color:#64748b !important;
-    margin:0 0 8px 0 !important;
-  }
-  #studentPhotoUploadSection .student-photo-fixed-actions{
-    display:flex !important;
-    flex-wrap:wrap !important;
-    gap:7px !important;
-  }
-  @media(max-width:640px){
-    #studentPhotoUploadSection .student-photo-fixed-grid{
-      grid-template-columns:1fr !important;
-      text-align:center !important;
-    }
-    #studentPhotoUploadSection #stdPhotoPreview{
-      margin:0 auto !important;
-    }
-    #studentPhotoUploadSection .student-photo-fixed-actions{
-      justify-content:center !important;
-    }
-  }
-</style>
-
-<script id="final-global-login-stray-fix-2026">
+<!-- FINAL LOGIN + STRAY FIX: removes only standalone literal backslash-n text nodes. -->
+<script id="final-login-stray-fix">
 (function () {
-  "use strict";
-
-  /*
-   * Penting: regex ini hanya berjalan pada TEXT NODE yang dipaparkan.
-   * SCRIPT, STYLE, PRE dan TEXTAREA sengaja dikecualikan supaya kod JS/CSS
-   * yang mempunyai escape "\\n" tidak disentuh.
-   */
-  function removeVisibleLiteralBackslashN(root) {
-    if (!root) return;
-
-    var walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT,
-      null
-    );
-    var removeList = [];
-    var replaceList = [];
-    var node;
-
-    while ((node = walker.nextNode())) {
-      var parent = node.parentElement;
-      if (parent) {
-        var tag = parent.tagName;
-        if (tag === "SCRIPT" || tag === "STYLE" || tag === "PRE" || tag === "TEXTAREA") {
-          continue;
-        }
+  function showInitialLogin() {
+    try {
+      if (typeof currentUser !== 'undefined' && currentUser === null) {
+        const auth = document.getElementById('authScreen');
+        const dashboard = document.getElementById('appDashboard');
+        const userInfo = document.getElementById('userInfo');
+        if (auth) auth.classList.remove('hidden');
+        if (dashboard) dashboard.classList.add('hidden');
+        if (userInfo) userInfo.classList.add('hidden');
       }
-
-      var value = String(node.nodeValue || "");
-      var trimmed = value.trim();
-
-      /* Buang \n, \\n, \\\\n dan variasi backslash+n yang berdiri sendiri. */
-      if (/^\\+n$/.test(trimmed)) {
-        removeList.push(node);
-      } else if (value.indexOf("\\n") !== -1) {
-        /* Jika terselit dalam teks paparan, buang literal itu sahaja. */
-        replaceList.push([node, value.replace(/\\+n/g, " ")]);
-      }
+    } catch (e) {
+      console.warn('Initial login state guard:', e);
     }
+  }
 
-    removeList.forEach(function (n) {
+  function isProtectedNode(node) {
+    const p = node && node.parentElement;
+    if (!p) return false;
+    const tag = String(p.tagName || '').toUpperCase();
+    return tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE' || tag === 'TEXTAREA' || tag === 'PRE';
+  }
+
+  function removeStandaloneLiteralNewline(root) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const remove = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      if (isProtectedNode(node)) continue;
+      const text = String(node.nodeValue || '').trim();
+      if (/^(?:\\+n)+$/.test(text)) remove.push(node);
+    }
+    remove.forEach(function (n) {
       if (n && n.parentNode) n.parentNode.removeChild(n);
     });
-
-    replaceList.forEach(function (pair) {
-      if (pair[0] && pair[0].parentNode) pair[0].nodeValue = pair[1];
-    });
-
-    /* Bersihkan shadow root terbuka jika ada. */
-    if (root.querySelectorAll) {
-      root.querySelectorAll("*").forEach(function (el) {
-        if (el.shadowRoot) removeVisibleLiteralBackslashN(el.shadowRoot);
-      });
-    }
   }
 
-  function forceLoginVisualState() {
+  function cleanupStrayText() {
+    removeStandaloneLiteralNewline(document.documentElement);
+  }
+
+  function ensureLoginAndPhoto() {
+    showInitialLogin();
+    cleanupStrayText();
     try {
-      if (typeof currentUser === "undefined" || currentUser === null) {
-        var auth = document.getElementById("authScreen");
-        var dashboard = document.getElementById("appDashboard");
-        var userInfo = document.getElementById("userInfo");
-        var nav = document.getElementById("premiumNavigation");
-        var ctx = document.getElementById("premiumContextBar");
-        var foot = document.getElementById("esppFooter");
-        var fab = document.getElementById("premiumChatFab");
-
-        if (auth) auth.classList.remove("hidden");
-        if (dashboard) dashboard.classList.add("hidden");
-        if (userInfo) userInfo.classList.add("hidden");
-        if (nav) nav.classList.add("hidden");
-        if (ctx) ctx.classList.add("hidden");
-        if (foot) foot.style.display = "none";
-        if (fab) fab.style.display = "none";
-      }
-    } catch (err) {
-      console.warn("Login visual guard:", err);
+      if (typeof ensureStudentPhotoUploadSection === 'function') ensureStudentPhotoUploadSection();
+    } catch (e) {
+      console.warn('Student photo UI guard:', e);
     }
-  }
-
-  function ensureStudentPhotoVisible() {
-    try {
-      var formArea = document.getElementById("studentFormArea");
-      if (!formArea) return;
-      var form = formArea.querySelector("form");
-      if (!form) return;
-
-      var section = document.getElementById("studentPhotoUploadSection");
-      if (!section) {
-        /* Fallback hanya jika fail lama/deployment lama benar-benar tiada blok foto. */
-        section = document.createElement("div");
-        section.id = "studentPhotoUploadSection";
-        section.innerHTML =
-          '<div class="student-photo-fixed-grid">' +
-            '<div class="w-24 h-28 rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden shrink-0 shadow-sm flex items-center justify-center">' +
-              '<img id="stdPhotoPreview" src="https://via.placeholder.com/120x140?text=Foto+Murid" alt="Foto murid" class="w-full h-full object-cover">' +
-            '</div>' +
-            '<div class="flex-1 w-full">' +
-              '<label class="student-photo-fixed-title">📷 Gambar Murid</label>' +
-              '<p class="student-photo-fixed-note">Pilihan sahaja. JPG atau PNG, maksimum 2 MB.</p>' +
-              '<div class="student-photo-fixed-actions">' +
-                '<label for="stdPhotoFile" class="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-2 rounded-xl font-bold cursor-pointer">📁 Pilih Gambar</label>' +
-                '<button type="button" onclick="clearStudentPhoto()" class="inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-3 py-2 rounded-xl font-bold">✕ Buang</button>' +
-              '</div>' +
-              '<input type="file" id="stdPhotoFile" accept="image/jpeg,image/png" class="hidden" onchange="handleStudentPhotoSelect(event)">' +
-              '<input type="hidden" id="stdPhotoUrl" value="">' +
-              '<p id="stdPhotoStatus" class="text-[10px] text-emerald-700 font-bold mt-2 min-h-[14px]"></p>' +
-            '</div>' +
-          '</div>';
-        form.insertBefore(section, form.firstElementChild || null);
-      }
-
-      section.style.display = "block";
-      section.style.visibility = "visible";
-      section.style.opacity = "1";
-      if (form.firstElementChild !== section) {
-        form.insertBefore(section, form.firstElementChild || null);
-      }
-    } catch (err) {
-      console.warn("Student photo visibility guard:", err);
-    }
-  }
-
-  function runAllFixes() {
-    forceLoginVisualState();
-    ensureStudentPhotoVisible();
-    removeVisibleLiteralBackslashN(document.documentElement || document.body);
   }
 
   function initialize() {
-    runAllFixes();
+    ensureLoginAndPhoto();
+    const root = document.documentElement;
+    if (!root) return;
 
-    /* Tangkap teks \n yang mungkin dicipta oleh kod aplikasi kemudian. */
-    var observer = new MutationObserver(function () {
-      runAllFixes();
+    let cleaning = false;
+    const observer = new MutationObserver(function () {
+      if (cleaning) return;
+      cleaning = true;
+      try { cleanupStrayText(); }
+      finally { cleaning = false; }
     });
+    observer.observe(root, { childList: true, subtree: true, characterData: true });
 
-    if (document.documentElement) {
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-    }
-
-    /* Tambahan perlindungan untuk render/asynchronous login. */
-    [100, 300, 700, 1200, 2000, 3500].forEach(function (delay) {
-      setTimeout(runAllFixes, delay);
+    [0, 100, 300, 800, 1500, 3000].forEach(function (ms) {
+      setTimeout(ensureLoginAndPhoto, ms);
     });
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initialize, { once: true });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize, { once: true });
   } else {
     initialize();
   }
 })();
 </script>
 
-<!-- Supabase: pastikan public.students mempunyai kolum berikut jika belum ada.
-ALTER TABLE public.students ADD COLUMN IF NOT EXISTS photo_url text;
+
+<!-- STUDENT PHOTO NOTE:
+     Jalankan sekali di Supabase:
+     ALTER TABLE public.students ADD COLUMN IF NOT EXISTS photo_url text;
+     Tiada operasi database automatik ditambah.
 -->
 
-</body></html>
+
+
+</body><grammarly-desktop-integration data-grammarly-shadow-root="true" style="visibility: visible !important;"></grammarly-desktop-integration></html>
